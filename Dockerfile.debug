@@ -1,5 +1,10 @@
 # Elastalert Docker image running on Alpine Linux.
-# Build image with: docker build -t theneb/elastalert:latest .
+# The key differences between this image and the "normal" image are:
+# - Debug is enabled for this file.
+# - The elastalert_modules directory can be mounted.
+# - The elastalert_modules_test directory is mounted.
+# - Pytest is installed for Unit Testing.
+# Build image with: docker build -f ./Dockerfile.debug -t theneb/elastalert:debug .
 #
 # The WORKDIR instructions are deliberately left, as it is recommended to use WORKDIR over the cd command.
 
@@ -13,6 +18,7 @@ ENV SET_CONTAINER_TIMEZONE false
 ENV CONTAINER_TIMEZONE Europe/Stockholm
 # URL from which to download Elastalert.
 ENV ELASTALERT_URL https://github.com/Yelp/elastalert/archive/master.zip
+# ENV ELASTALERT_URL https://github.com/Yelp/elastalert/archive/v0.1.8.zip
 # Directory holding configuration for Elastalert and Supervisor.
 ENV CONFIG_DIR /opt/config
 # Elastalert rules directory.
@@ -29,6 +35,8 @@ ENV ELASTALERT_HOME /opt/${ELASTALERT_DIRECTORY_NAME}
 ENV MODULES_DIRECTORY_NAME elastalert_modules
 # Elastalert custom modules directory
 ENV MODULES_DIRECTORY ${ELASTALERT_HOME}/${MODULES_DIRECTORY_NAME}
+# Test Cases for Elastalert custom modules
+ENV MODULES_TEST_DIRECTORY ${ELASTALERT_HOME}/elastalert_modules_test
 # Supervisor configuration file for Elastalert.
 ENV ELASTALERT_SUPERVISOR_CONF ${CONFIG_DIR}/elastalert_supervisord.conf
 # Alias, DNS or IP of Elasticsearch host to be queried by Elastalert. Set in default Elasticsearch configuration file.
@@ -50,9 +58,7 @@ COPY ./msend.tar.gz /opt/
 RUN tar -zxvf /opt/msend.tar.gz && \
     rm /opt/msend.tar.gz
 
-
 # Here we install GNU libc (aka glibc) and set C.UTF-8 locale as default. (Used by MSEND)
-
 RUN ALPINE_GLIBC_BASE_URL="https://github.com/sgerrand/alpine-pkg-glibc/releases/download" && \
     ALPINE_GLIBC_PACKAGE_VERSION="2.25-r0" && \
     ALPINE_GLIBC_BASE_PACKAGE_FILENAME="glibc-$ALPINE_GLIBC_PACKAGE_VERSION.apk" && \
@@ -106,11 +112,7 @@ RUN apk update && \
     wget ${ELASTALERT_URL} && \
     unzip *.zip && \
     rm *.zip && \
-    mv e* ${ELASTALERT_DIRECTORY_NAME} && \
- # Create the custom modules directory inside elastalert directory
-    mkdir -p ${MODULES_DIRECTORY}
-
-COPY ./${MODULES_DIRECTORY_NAME}/* ${MODULES_DIRECTORY}/
+    mv e* ${ELASTALERT_DIRECTORY_NAME}
 
 WORKDIR ${ELASTALERT_HOME}
 
@@ -124,6 +126,9 @@ RUN python setup.py install && \
 # Install Supervisor.
     easy_install supervisor && \
 
+# Install Tox
+    pip install -U pytest && \
+
 # Make the start-script executable.
     chmod +x /opt/start-elastalert.sh && \
 
@@ -133,6 +138,8 @@ RUN python setup.py install && \
 # Create directories. The /var/empty directory is used by openntpd.
     mkdir -p ${CONFIG_DIR} && \
     mkdir -p ${RULES_DIRECTORY} && \
+    mkdir -p ${MODULES_DIRECTORY} && \
+    mkdir -p ${MODULES_TEST_DIRECTORY} && \
     mkdir -p ${LOG_DIR} && \
     mkdir -p /var/empty && \
 
@@ -154,11 +161,10 @@ RUN python setup.py install && \
     # Redirect Supervisor stderr output to a file in the designated logs directory.
     sed -i -e"s|stderr_logfile=.*log|stderr_logfile=${LOG_DIR}/elastalert_stderr.log|g" ${ELASTALERT_SUPERVISOR_CONF} && \
     # Modify the start-command.
-    sed -i -e"s|python elastalert.py|python -m elastalert.elastalert --config ${ELASTALERT_CONFIG}|g" ${ELASTALERT_SUPERVISOR_CONF} && \
+    sed -i -e"s|python elastalert.py|python -m elastalert.elastalert --config ${ELASTALERT_CONFIG} --es_debug --es_debug_trace ${LOG_DIR}/es_debug_trace.log|g" ${ELASTALERT_SUPERVISOR_CONF} && \
 
 # Copy the Elastalert configuration file to Elastalert home directory to be used when creating index first time an Elastalert container is launched.
     cp ${ELASTALERT_CONFIG} ${ELASTALERT_HOME}/config.yaml && \
-
 
 # Clean up.
     apk del python-dev && \
@@ -171,7 +177,7 @@ RUN python setup.py install && \
     supervisord -c ${ELASTALERT_SUPERVISOR_CONF}
 
 # Define mount points.
-VOLUME [ "${CONFIG_DIR}", "${RULES_DIRECTORY}", "${LOG_DIR}"]
+VOLUME [ "${CONFIG_DIR}", "${RULES_DIRECTORY}", "${MODULES_DIRECTORY}", "${MODULES_TEST_DIRECTORY}", "${LOG_DIR}"]
 
 # Launch Elastalert when a container is started.
 CMD ["/opt/start-elastalert.sh"]
