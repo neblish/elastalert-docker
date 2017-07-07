@@ -1,2 +1,3 @@
 #ignore all compile python files
 *.pyc
+__pycache__

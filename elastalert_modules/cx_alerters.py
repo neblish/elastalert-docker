@@ -1,11 +1,21 @@
+import datetime
 import json
 import logging
 import re
+import requests
 import subprocess
 
-from elastalert.alerts import Alerter, BasicMatchString
+from elasticsearch.client import Elasticsearch
+from exchangelib import Credentials, Account, DELEGATE, Configuration, Mailbox, Message
+from requests.exceptions import RequestException
+
+from elastalert.alerts import Alerter, EmailAlerter, BasicMatchString, DateTimeEncoder
 from elastalert.util import EAException
 from elastalert.util import lookup_es_key
+from elastalert.util import elastalert_logger
+from elastalert.util import elasticsearch_client
+from elastalert.util import ts_now
+from elastalert.util import format_index
 
 """
 Custom Alerter for sending events via MSEND command.
@@ -89,7 +99,7 @@ class MSendAlerter(Alerter):
 
     # Alert is called
     def alert(self, matches):
-        message = self.create_custom_title(matches)
+        message = self.create_title(matches)
         detailed_message = self.create_alert_body(matches)
 
         command = [
@@ -151,25 +161,315 @@ class MSendAlerter(Alerter):
                 'msend command': ' '.join(self.last_command)}
 
 """
+Custom Alerter to send alert to an Exchange server
+This alerter inherits from EmailAlerter, thus similar options are used.
+"""
+class ExchangeAlerter(EmailAlerter):
+
+    """ Sends an email alert """
+    required_options = frozenset(['email', 'from_addr', 'exchange_auth_file'])
+
+    known_options = [
+        'email',
+        'from_addr',
+        'email_add_domain',
+        'email_from_field',
+        'email_reply_to',
+        'cc',
+        'bcc',
+        'exchange_host',
+        'exchange_service_endpoint',
+        'exchange_auth_type',
+        'exchange_auth_file',
+    ]
+
+    unused_options = [
+        'smtp_auth_file',
+        'smtp_host',
+        'smtp_port',
+        'smtp_ssl'
+    ]
+
+    def __init__(self, rule):
+        super(ExchangeAlerter, self).__init__(rule)
+
+        # Mandatory fields
+        if self.rule.get('exchange_auth_file'):
+            self.get_account(self.rule['exchange_auth_file'])
+
+        #Optional fields
+        self.exchange_host = self.rule.get('exchange_host')
+        self.exchange_service_endpoint = self.rule.get('exchange_service_endpoint')
+        self.exchange_auth_type = self.rule.get('exchange_auth_type')
+
+    """
+    Some of the code is a copy-and-paste from EmailAlerter.
+    If anything changes in EmailAlerter ensure this method is updated accordingly.
+    """
+    def alert(self, matches):
+        body = self.create_alert_body(matches)
+
+        # START copy-and-paste from EmailAlerter
+        # Add JIRA ticket if it exists
+        if self.pipeline is not None and 'jira_ticket' in self.pipeline:
+            url = '%s/browse/%s' % (self.pipeline['jira_server'], self.pipeline['jira_ticket'])
+            body += '\nJIRA ticket: %s' % (url)
+
+        to_addr = self.rule['email']
+        if 'email_from_field' in self.rule:
+            recipient = lookup_es_key(matches[0], self.rule['email_from_field'])
+            if isinstance(recipient, basestring):
+                if '@' in recipient:
+                    to_addr = [recipient]
+                elif 'email_add_domain' in self.rule:
+                    to_addr = [recipient + self.rule['email_add_domain']]
+
+        # END copy-and-paste from EmailAlerter
+
+        try:
+           # setup exchangelib objects
+            credentials = Credentials(username=self.user, password=self.password)
+
+            if self.exchange_host or self.exchange_service_endpoint:
+                config = Configuration(server=self.exchange_host, service_endpoint=self.exchange_service_endpoint,
+                    auth_type=self.exchange_auth_type, credentials=credentials)
+                account = Account(primary_smtp_address=self.from_addr, config=config, 
+                    autodiscover=False, access_type=DELEGATE)
+            else:
+                account = Account(primary_smtp_address=self.from_addr, credentials=credentials,
+                    autodiscover=True, access_type=DELEGATE)
+
+            email_subject = self.create_title(matches)
+            email_msg = body.encode('UTF-8')
+
+            reply_to = self.rule.get('email_reply_to', self.from_addr)
+
+            to_recipients = [ Mailbox(email_address=i) for i in to_addr ]
+            cc_recipients = None
+            bcc_recipients= None
+            if self.rule.get('cc'):
+                cc_recipients = [ Mailbox(email_address=i) for i in self.rule['cc']]
+
+            if self.rule.get('bcc'):
+                bcc_recipients = [ Mailbox(email_address=i) for i in self.rule['bcc']]
+
+            msg = Message (
+                account = account,
+                folder = account.sent,
+                subject = email_subject,
+                body = email_msg,
+                to_recipients=to_recipients,
+                cc_recipients=cc_recipients,
+                bcc_recipients=bcc_recipients,
+            )
+            
+            # send the message
+            msg.send_and_save()
+        except Exception as e:
+            raise EAException("Error connecting to Exchange host: %s" % (e))
+
+        elastalert_logger.info("Sent email to %s" % (to_addr))       
+
+    def get_info(self):
+        return {'type': 'msexchange',
+                'recipients': self.rule['email']}
+
+"""
+Generic Alerter to send an HTTP post to an endpoint
+"""
+class HttpPostAlerter(Alerter):
+
+    required_options = frozenset(['http_post_url']);
+
+    known_options = [
+        'http_post_url',
+        'http_post_data',
+        'http_post_data_as_json',
+        'http_post_headers', # Request headers as dict
+        'http_post_include_alert_subject', # Send alert subject as part of the payload
+        'http_post_include_alert_body', # Send body as part of the payload
+        'new_style_string_format' # Use new style string formatting 
+    ]
+
+    def __init__(self, rule):
+        super(HttpPostAlerter, self).__init__(rule)
+        self.url = self.rule['http_post_url']
+
+        self.post_data = self.rule.get('http_post_data')
+        self.send_as_json = self.rule.get('http_post_data_as_json', True)
+        self.headers = self.rule.get('http_post_headers')
+        self.include_alert_subject = self.rule.get('http_post_include_alert_subject', False)
+        self.include_alert_body = self.rule.get('http_post_include_alert_body', False)
+        self.new_style_string_format = self.rule.get('new_style_string_format', False)
+
+        if self.post_data and not isinstance(self.post_data, (basestring, dict)):
+            raise EAException('http_post_data must be either a string or a dict.')
+        if self.headers and not isinstance(self.headers, dict):
+            raise EAException('http_post_headers must be a dict.')
+
+
+    def alert(self, matches):
+
+        post_message = None
+        # Default message if no data definition was defined
+        if (not self.post_data):
+            post_message = {
+                'rule': self.rule['name'],
+                'matches': matches
+            }
+        elif isinstance(self.post_data, basestring) and self.send_as_json:
+            post_message = {'message': self.post_data}
+        else: # self.post_data is of type dict
+            # Apply match values to data fields (only uses matches[0])
+            post_message = {}
+            self.populate_match_data(self.post_data, matches[0], post_message)
+
+        if not self.headers:
+            self.headers = {}
+
+        if self.send_as_json:
+            self.headers["Content-Type"] = "application/json"
+            self.headers["Accept"] = "application/json;charset=utf-8"
+        else: 
+            self.headers["Content-Type"] = "text/plain"
+            self.headers["Accept"] = "charset=utf-8"
+
+        # Tailor post data according to rule config
+        if self.include_alert_subject:
+            post_message['alert_subject'] = create_title(matches);
+        if self.include_alert_body:
+            post_message['alert_body'] = create_alert_body(matches);
+
+        postdata = json.dumps(post_message, cls=DateTimeEncoder) if self.send_as_json else self.data
+
+        elastalert_logger.info('postdata: %s' % postdata)
+        try:
+            response = requests.post(self.url, data=postdata, headers=self.headers)
+            response.raise_for_status()
+            elastalert_logger.info(response.text)
+        except RequestException as e:
+            raise EAException("Error posting alert: %s" % e)
+        elastalert_logger.info("HTTP POST sent")
+
+    def get_info(self):
+        return {'type': 'http_post',
+                'url': self.rule['http_post_url']}
+
+    def populate_match_data(self, template, match, result):
+        for key, value in template.iteritems():
+            if isinstance(value, dict):
+                sub_result = {}
+                self.populate_match_data(value, match, sub_result)
+                result[key] = sub_result
+            elif self.new_style_string_format:
+                result[key] = value.format(**match)
+            else:
+                result[key] = value % match
+
+
+"""
 Custom Alerter to forward the alert to an ElasticSearch index.
 """
 class ElasticSearchAlerter(Alerter):
 
-    required_options = frozenset(['esalert_index','esalert_fieldmapping'])
+    required_options = frozenset(['esalerter_index','esalerter_document_type','esalerter_data'])
 
     known_options = [
-        'esalert_index'
-        'esalert_fieldmapping',
+        'esalerter_host',
+        'esalerter_port',
+        'esalerter_use_ssl',
+        'esalerter_username',
+        'esalerter_password',
+        'esalerter_url_prefix',
+        'esalerter_verify_certs',
+        'esalerter_use_strftime_index',
+        'esalerter_index',
+        'esalerter_document_type',
+        'esalerter_data',
+        'new_style_string_format'
     ]
 
     def __init__(self, rule):
         super(ElasticSearchAlerter, self).__init__(rule)
-        self.es_index = self.rule['esalert_index']
-        self.es_mapping = self.rule['esalert_mapping']
+        self.es_index = self.rule['esalerter_index']
+        self.es_doc_type = self.rule['esalerter_document_type']
+        self.es_data = self.rule['esalerter_data']
 
-        #Future Enhancement: write to an different ES Instance
-
-        # Alert is called
-    def alert(self, matches):
-        super.alert(matches) #Placeholder - need a bit more refinement
+        # Optional Parameter processing
+        self.use_strftime_index = self.rule.get('esalerter_use_strftime_index', False)
+        self.new_style_string_format = self.rule.get('new_style_string_format', False)
         
+        # ElasticSearch Config processing
+        temp_conf = {}
+        temp_conf['es_host'] = self.rule.get('esalerter_host', self.rule['es_host'])
+        temp_conf['es_port'] = self.rule.get('esalerter_port', self.rule['es_port'])
+
+        if 'esalerter_use_ssl' in self.rule:
+            temp_conf['es_use_ssl'] = self.rule.get('esalerter_use_ssl', self.rule.get('use_ssl'))
+        if 'esalerter_usename' in self.rule:  
+            temp_conf['es_username'] = self.rule.get('esalerter_usename', self.rule.get('es_username'))
+        if 'esalerter_password' in self.rule:
+            temp_conf['es_password'] = self.rule.get('esalerter_password', self.rule.get('es_password'))
+        if 'esalerter_url_prefix' in self.rule:
+            temp_conf['es_url_prefix'] = self.rule('esalerter_url_prefix', self.rule.get('es_url_prefix'))
+        if 'esalerter_verify_certs' in self.rule:
+            temp_conf['verify_certs'] = self.rule('esalerter_verify_certs', self.rule.get('verify_certs'))
+
+        self.conf = dict((k, v) for k, v in temp_conf.iteritems() if v)
+        
+
+    # Alert is called
+    def alert(self, matches):
+
+        alert_content = {
+            'alert_subject' : self.create_title(matches),
+            'alert_text' : self.create_alert_body(matches)
+        }
+        es_document = {}
+        es_all_data = dict((k,v) for k,v in matches[0].iteritems())
+        es_all_data.update(alert_content)
+        self.populate_match_data(self.es_data, es_all_data, es_document)
+
+
+
+        # Init the ElasticSearchClient object
+        es_client = elasticsearch_client(self.conf)
+
+        now = ts_now()
+        es_target_index = format_index(self.es_index, now, now)
+        
+        # Check the index exists (creates one if it does not yet exist)
+        if not es_client.indices.exists(es_target_index):
+            settings = {
+                'index' : {
+                    'number_of_shards' : 2,
+                    'number_of_replicas' : 2,
+                    'mapper' : {'dynamic': True }
+                }
+            }
+            es_client.indices.create(es_target_index)
+            es_client.indices.put_settings(index = es_target_index, body = settings)
+            elastalert_logger.info('Index \'%s\' created' % es_target_index)
+
+        # Write to target index
+        es_client.index(
+            index=es_target_index, 
+            doc_type=self.es_doc_type, 
+            body=es_document)
+        elastalert_logger.info('Alert written into index %s' % es_target_index)
+
+
+    def populate_match_data(self, template, match, result):
+        for key, value in template.iteritems():
+            if isinstance(value, dict):
+                sub_result = {}
+                self.populate_match_data(value, match, sub_result)
+                result[key] = sub_result
+            elif self.new_style_string_format:
+                result[key] = value.format(**match)
+            else:
+                result[key] = value % match
+    
+    def get_info(self):
+        return {'type': 'elasticsearch',
+                'index': self.rule['esalerter_index']}

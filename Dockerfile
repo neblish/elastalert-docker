@@ -1,11 +1,11 @@
 # Elastalert Docker image running on Alpine Linux.
-# Build image with: docker build -t theneb/elastalert:latest .
+# Build image with: docker build -t neblish/elastalert:latest .
 #
 # The WORKDIR instructions are deliberately left, as it is recommended to use WORKDIR over the cd command.
 
 FROM iron/python:2
 
-MAINTAINER Benjamin Lai, https://github.com/theneb
+MAINTAINER Benjamin Lai, https://github.com/neblish
 
 # Set this environment variable to true to set timezone on container start.
 ENV SET_CONTAINER_TIMEZONE false
@@ -96,6 +96,9 @@ RUN apk update && \
         openntpd  \
         openssl-dev \
         libffi-dev \
+        # Required for exchangelib
+        libxml2-dev \
+        libxslt-dev \
         build-base && \
     rm -rf /var/cache/apk/* && \
 # Install pip - required for installation of Elastalert.
@@ -120,6 +123,9 @@ RUN python setup.py install && \
     #Temp workaround - ensure twilio is v6.0.0
     pip uninstall twilio --yes && \
     pip install twilio==6.0.0 && \
+
+# Install Exchange Libraries
+    pip install -U exchangelib && \
 
 # Install Supervisor.
     easy_install supervisor && \
@@ -166,6 +172,8 @@ RUN python setup.py install && \
     apk del gcc && \
     apk del openssl-dev && \
     apk del libffi-dev && \
+    apk del libxml2-dev && \
+    apk del libxslt-dev && \
 
 # Add Elastalert to Supervisord.
     supervisord -c ${ELASTALERT_SUPERVISOR_CONF}

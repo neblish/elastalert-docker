@@ -4,13 +4,13 @@
 # - The elastalert_modules directory can be mounted.
 # - The elastalert_modules_test directory is mounted.
 # - Pytest is installed for Unit Testing.
-# Build image with: docker build -f ./Dockerfile.debug -t theneb/elastalert:debug .
+# Build image with: docker build -f ./Dockerfile.debug -t neblish/elastalert:debug .
 #
 # The WORKDIR instructions are deliberately left, as it is recommended to use WORKDIR over the cd command.
 
 FROM iron/python:2
 
-MAINTAINER Benjamin Lai, https://github.com/theneb
+MAINTAINER Benjamin Lai, https://github.com/neblish
 
 # Set this environment variable to true to set timezone on container start.
 ENV SET_CONTAINER_TIMEZONE false
@@ -102,6 +102,11 @@ RUN apk update && \
         openntpd  \
         openssl-dev \
         libffi-dev \
+        # Required for exchangelib
+        libxml2 \
+        libxml2-dev \
+        libxslt \
+        libxslt-dev \
         build-base && \
     rm -rf /var/cache/apk/* && \
 # Install pip - required for installation of Elastalert.
@@ -120,13 +125,16 @@ WORKDIR ${ELASTALERT_HOME}
 RUN python setup.py install && \
     pip install -e . && \
     #Temp workaround - ensure twilio is v6.0.0
-    pip uninstall twilio --yes && \
-    pip install twilio==6.0.0 && \
+#    pip uninstall twilio --yes && \
+#    pip install twilio==6.0.0 && \
+
+# Install Exchange Libraries
+    pip install -U exchangelib && \
 
 # Install Supervisor.
     easy_install supervisor && \
 
-# Install Tox
+# Install pytest [NOTE: Only required for development]
     pip install -U pytest && \
 
 # Make the start-script executable.
@@ -172,6 +180,8 @@ RUN python setup.py install && \
     apk del gcc && \
     apk del openssl-dev && \
     apk del libffi-dev && \
+    apk del libxml2-dev && \
+    apk del libxslt-dev && \
 
 # Add Elastalert to Supervisord.
     supervisord -c ${ELASTALERT_SUPERVISOR_CONF}
