@@ -1,3 +1,5 @@
+import calendar
+import copy
 import datetime
 import json
 import logging
@@ -14,46 +16,44 @@ from elastalert.util import EAException
 from elastalert.util import lookup_es_key
 from elastalert.util import elastalert_logger
 from elastalert.util import elasticsearch_client
-from elastalert.util import ts_now
+from elastalert.util import ts_now, ts_to_dt
 from elastalert.util import format_index
 
-"""
-Custom Alerter for sending events via MSEND command.
-Running this Alerter will require MSEND to be installed on the ElastAlert host.
-This Alerter has the following options available:
 
-Mandatory options:
-- msend_cell_name - The Cell to MSEND to (corresponds to the -n command line option)
-- msend_event_class - The event class (corresponds to the -a command line option)
-- msend_event_severity - The event severity (corresponds to the -r command line option)
-- msend_event_message - The message (corresponds to the -m command line option)
-
-Optionals:
-- msend_slotsetvalues - The slot set values (corresponds to the -b command line option)
-  
-  This can either be a string or an dictionary datatype, for example:
-
-  msend_slotsetvalues: "key1=value1;key2=value2"
-
-  msend_slotsetvalues:
-    key1: "value1"
-    key2: "value2"
-
-  Strings can be formatted using the old-style format (%) or the new-style format (.format()). 
-  When the old-style format is used, fields are accessed using %(field_name)s. 
-  When the new-style format is used, fields are accessed using {match[field_name]}. 
-  New-style formatting allows accessing nested fields (e.g., {match[field_1_name][field_2_name]}).
-  
-  In an aggregated alert, those fields will come from the first match.
-
-- new_style_string_format - If True, arguments are formatted using .format() rather than %. The default is False.
-"""
 class MSendAlerter(Alerter):
+    """
+    ### Note: This Alerter has been deprecated in favour of the MSendServiceAlerter.
 
-    # By setting required_options to a set of strings
-    # You can ensure that the rule config file specifies all
-    # of the options. Otherwise, ElastAlert will throw an exception
-    # when trying to load the rule.
+    Custom Alerter for sending events via MSEND command.
+    Running this Alerter will require MSEND to be installed on the ElastAlert host.
+    This Alerter has the following options available:
+
+    Mandatory options:
+    - msend_cell_name - The Cell to MSEND to (corresponds to the -n command line option)
+    - msend_event_class - The event class (corresponds to the -a command line option)
+    - msend_event_severity - The event severity (corresponds to the -r command line option)
+    - msend_event_message - The message (corresponds to the -m command line option)
+
+    Optionals:
+    - msend_slotsetvalues - The slot set values (corresponds to the -b command line option)
+      
+      This can either be a string or an dictionary datatype, for example:
+
+      msend_slotsetvalues: "key1=value1;key2=value2"
+
+      msend_slotsetvalues:
+        key1: "value1"
+        key2: "value2"
+
+      Strings can be formatted using the old-style format (%) or the new-style format (.format()). 
+      When the old-style format is used, fields are accessed using %(field_name)s. 
+      When the new-style format is used, fields are accessed using {match[field_name]}. 
+      New-style formatting allows accessing nested fields (e.g., {match[field_1_name][field_2_name]}).
+      
+      In an aggregated alert, those fields will come from the first match.
+
+    - new_style_string_format - If True, arguments are formatted using .format() rather than %. The default is False.
+    """
     required_options = frozenset(['msend_cell_name','msend_event_class','msend_event_severity' ])
 
     known_options = [
@@ -160,13 +160,163 @@ class MSendAlerter(Alerter):
                 'cell': self.rule['msend_cell_name'],
                 'msend command': ' '.join(self.last_command)}
 
-"""
-Custom Alerter to send alert to an Exchange server
-This alerter inherits from EmailAlerter, thus similar options are used.
-"""
-class ExchangeAlerter(EmailAlerter):
 
-    """ Sends an email alert """
+
+class MSendServiceAlerter(Alerter):
+    """
+    Custom Alerter that sends alerts to a custom MSEND Microservice
+    For msend microservice please refer to neblish/msend-service docker image
+
+    Mandatory options:
+    - msend_service_url - The service endpoint for the MSend Microservice
+    - msend_cell_name - The Cell to MSEND to (corresponds to the -n command line option)
+    - msend_event_class - The event class (corresponds to the -a command line option)
+    - msend_event_severity - The event severity (corresponds to the -r command line option)
+    
+
+    Optionals:
+    - msend_event_message - The message (corresponds to the -m command line option)
+    - msend_slotsetvalues - The slot set values (corresponds to the -b command line option)
+      
+      This can either be a string or an dictionary datatype, for example:
+
+      msend_slotsetvalues: "key1=value1;key2=value2"
+
+      msend_slotsetvalues:
+        key1: "value1"
+        key2: "value2"
+
+      Strings can be formatted using the old-style format (%) or the new-style format (.format()). 
+      When the old-style format is used, fields are accessed using %(field_name)s. 
+      When the new-style format is used, fields are accessed using {match[field_name]}. 
+      New-style formatting allows accessing nested fields (e.g., {match[field_1_name][field_2_name]}).
+      
+      For the mc_notes slot, please note that the format needs to be a "flattened" array of tuples of {hex_timestamp, user, message}, for example:
+      ['0x597da640','ElasticSearch','Message #1','0x597da640','ElasticSearch','Message #2'] 
+
+      In an aggregated alert, those fields will come from the first match.
+    """
+    required_options = frozenset(['msend_service_url','msend_cell_name','msend_event_class','msend_event_severity' ])
+
+    known_options = [
+        'msend_cell_name',
+        'msend_event_class',
+        'msend_event_message',
+        'msend_event_severity',
+        'msend_service_url',
+        'msend_slotsetvalues',
+        'new_style_string_format'
+    ]
+    def __init__(self, rule):
+        super(MSendServiceAlerter, self).__init__(rule)
+        
+        self.url = self.rule['msend_service_url']
+        self.cell_name = self.rule['msend_cell_name']
+        self.event_class = self.rule['msend_event_class']
+        self.event_severity = self.rule['msend_event_severity']
+
+        self.event_message = self.rule.get('msend_event_message')
+        self.slotsetvalues = self.rule.get('msend_slotsetvalues')
+
+        self.new_style_string_format = False
+        if 'new_style_string_format' in self.rule and self.rule['new_style_string_format']:
+            self.new_style_string_format = True
+
+        # Slot Set Values validation
+        if self.slotsetvalues is not None and not isinstance(self.slotsetvalues, dict):
+            raise EAException('slotsetvalues must be a dict')
+
+    def alert(self, matches):
+        message = self.create_title(matches)
+        detailed_message = self.create_alert_body(matches)
+
+        post_message = {
+            'msend_cell_name': self.cell_name,
+            'msend_event_class': self.event_class,
+            'msend_event_severity': self.event_severity,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept" : "application/json;charset=utf-8"
+        }
+      
+        if self.event_message is not None:
+            
+            try:
+                if self.new_style_string_format:
+                    post_message['msend_event_message'] = self.event_message.format(match=matches[0])
+                else:
+                    post_message['msend_event_message'] = self.event_message % matches[0]
+            except KeyError as e:
+                raise EAException("Cannot find field in match: %s" % (e))
+        else:
+            post_message['msend_event_message'] = message
+
+
+        if self.slotsetvalues is not None:
+            slotsetvalues = {}
+
+            for k,v in self.slotsetvalues.iteritems():
+                if k == 'mc_notes':
+                    continue
+                try:
+                    if self.new_style_string_format:
+                        value = v.format(match=matches[0])
+                    else :
+                        value = v % matches[0]
+                    slotsetvalues[k] = value
+
+                except KeyError as e:
+                    raise EAException("Cannot find key in match: %s" % (e))
+
+            if 'mc_notes' in self.slotsetvalues:
+                mc_notes = []
+
+                for item in self.slotsetvalues['mc_notes']:
+                    #elastalert_logger.info("item: %s" % item)
+                    try:
+                        if self.new_style_string_format:
+                            itemvalue = item.format(match=matches[0])
+                        else :
+                            itemvalue = item % matches[0]
+
+                    except KeyError as e:
+                        raise EAException("Cannot find key in mc_notes: %s" % (e))
+
+                    # Attempt to parse date
+                    try: 
+                        timestamp = ts_to_dt(itemvalue)
+                        itemvalue = hex(calendar.timegm(timestamp.utctimetuple()))
+                    except ValueError as e:
+                        pass
+
+                    mc_notes.append("'%s'" % itemvalue)
+
+                slotsetvalues['mc_notes'] = '[%s]' % ','.join(mc_notes)
+            post_message['msend_event_slotvalues'] = slotsetvalues
+
+        postdata = json.dumps(post_message, cls=DateTimeEncoder)
+
+        elastalert_logger.info('postdata: %s' % postdata)
+        try:
+            response = requests.post(self.url, data=postdata, headers=headers)
+            response.raise_for_status()
+            elastalert_logger.info(response.text)
+        except RequestException as e:
+            raise EAException("Error posting alert: %s" % e)
+        elastalert_logger.info("HTTP POST sent")
+
+    def get_info(self):
+        return {'type': 'MSEND Service Alerter',
+                'cell': self.rule['msend_cell_name']}
+
+class ExchangeAlerter(EmailAlerter):
+    """
+    Custom Alerter to send alert to an Exchange server
+    This alerter inherits from EmailAlerter, thus similar options are used.
+    """
+
     required_options = frozenset(['email', 'from_addr', 'exchange_auth_file'])
 
     known_options = [
@@ -197,16 +347,17 @@ class ExchangeAlerter(EmailAlerter):
         if self.rule.get('exchange_auth_file'):
             self.get_account(self.rule['exchange_auth_file'])
 
-        #Optional fields
+        # Optional fields
         self.exchange_host = self.rule.get('exchange_host')
         self.exchange_service_endpoint = self.rule.get('exchange_service_endpoint')
         self.exchange_auth_type = self.rule.get('exchange_auth_type')
 
-    """
-    Some of the code is a copy-and-paste from EmailAlerter.
-    If anything changes in EmailAlerter ensure this method is updated accordingly.
-    """
+
     def alert(self, matches):
+        """
+        Some of the code is a copy-and-paste from EmailAlerter.
+        If anything changes in EmailAlerter ensure this method is updated accordingly.
+        """
         body = self.create_alert_body(matches)
 
         # START copy-and-paste from EmailAlerter
@@ -274,10 +425,11 @@ class ExchangeAlerter(EmailAlerter):
         return {'type': 'msexchange',
                 'recipients': self.rule['email']}
 
-"""
-Generic Alerter to send an HTTP post to an endpoint
-"""
+
 class HttpPostAlerter(Alerter):
+    """
+    Generic Alerter to send an HTTP post to an endpoint
+    """
 
     required_options = frozenset(['http_post_url']);
 
@@ -367,11 +519,36 @@ class HttpPostAlerter(Alerter):
                 result[key] = value % match
 
 
-"""
-Custom Alerter to forward the alert to an ElasticSearch index.
-"""
-class ElasticSearchAlerter(Alerter):
 
+class ElasticSearchAlerter(Alerter):
+    """
+    Custom Alerter to send the alert to an ElasticSearch index.
+
+    This alerter has the following configuration options:
+
+    Required Attributes:
+    - esalerter_index: the ElasticSearch index to send the alert to. (Required, string, no default)
+    - esalerter_document_type: The target document type. (Required, String, no default)
+    - esalerter_data: The document mapping itself. (Required dict, no default)
+
+    Optional Attributes:
+
+    The following attributes are only required if the alert is to be written to a different ElasticSearch instance to the 
+    one specified in the rule:
+
+    - esalerter_host
+    - esalerter_port
+    - esalerter_use_ssl
+    - esalerter_username
+    - esalerter_password
+    - esalerter_url_prefix
+    - esalerter_verify_certs
+
+    Please refer to their "es_*" counterparts for documentation.
+
+    - esalerter_use_strftime_index: If this is true. The alerter will format the target index using datetime.strftime.  
+    - new_style_string_format: If True, arguments are formatted using .format() rather than %. The default is False.
+    """
     required_options = frozenset(['esalerter_index','esalerter_document_type','esalerter_data'])
 
     known_options = [
@@ -382,7 +559,7 @@ class ElasticSearchAlerter(Alerter):
         'esalerter_password',
         'esalerter_url_prefix',
         'esalerter_verify_certs',
-        'esalerter_use_strftime_index',
+        'esalerter_use_strftime_index', #TODO 
         'esalerter_index',
         'esalerter_document_type',
         'esalerter_data',

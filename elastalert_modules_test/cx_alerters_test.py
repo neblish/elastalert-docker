@@ -6,7 +6,7 @@ from elastalert.alerts import Alerter
 from elastalert.alerts import BasicMatchString
 from elastalert.config import load_modules
 from elastalert.util import EAException
-from elastalert_modules.cx_alerters import MSendAlerter, ExchangeAlerter, HttpPostAlerter, ElasticSearchAlerter
+from elastalert_modules.cx_alerters import MSendAlerter, MSendServiceAlerter, ExchangeAlerter, HttpPostAlerter, ElasticSearchAlerter
 from tests.alerts_test import mock_rule
 
 # Test with just the mandatory parameters
@@ -136,6 +136,179 @@ def test_msend_slotsetvalues_dict_variable_subst_newstrformat():
     with mock.patch("elastalert_modules.cx_alerters.subprocess.Popen") as mock_popen:
         alert.alert([match])
     mock_popen.assert_called_with("/opt/msend/bin/msend -l /opt/msend -n somecellname -a EVENT -r WARNING -m 'Alert Subject' -b 'mc_long_msg=foobarbaz;mc_more_msg=1;mc_tool=Elasticsearch;mc_host=testhost'", stdin=subprocess.PIPE, shell=True)
+
+
+# Test with just the mandatory parameters
+def test_msend_service_mandatory_params():
+    rule = {
+        'type': mock_rule(),
+        'alert_subject': 'Alert Subject',
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+    }
+    alert = MSendServiceAlerter(rule)
+    match = {'@timestamp': '2014-01-01T00:00:00',
+             'somefield': 'foobarbaz',
+             'nested': {'field': 1}}
+    expected_headers = {'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'}
+    expected_data = '{"msend_event_severity": "WARNING", "msend_cell_name": "somecellname", "msend_event_message": "Alert Subject", "msend_event_class": "EVENT"}'
+    with mock.patch("elastalert_modules.cx_alerters.requests.post") as mock_post:
+        alert.alert([match])
+    mock_post.assert_called_with('http://www.example.com/', headers = expected_headers, data = expected_data)
+
+# Test for alert_subject_args
+def test_msend_service_alert_subject_args():
+    rule = {
+        'type': mock_rule(),
+        'alert_subject': 'Alert Subject: {0} - {1}',
+        'alert_subject_args': ['@timestamp', 'somefield'],
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+    }
+    match = {'@timestamp': '2014-01-01T00:00:00',
+         'somefield': 'foobarbaz',
+         'nested': {'field': 1}}
+    alert = MSendServiceAlerter(rule)
+    expected_headers = {'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'}
+    expected_data = '{"msend_event_severity": "WARNING", "msend_cell_name": "somecellname", "msend_event_message": "Alert Subject: 2014-01-01T00:00:00 - foobarbaz", "msend_event_class": "EVENT"}'
+ 
+    with mock.patch("elastalert_modules.cx_alerters.requests.post") as mock_post:
+        alert.alert([match])
+    mock_post.assert_called_with('http://www.example.com/', headers = expected_headers, data = expected_data)
+
+# Test for slotsetvalues (should throw exception)
+def test_msend_service_slotsetvalues_string_type():
+    rule = {
+        'type': mock_rule(),
+        'alert_subject': 'Alert Subject',
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+        'msend_slotsetvalues' : 'mc_host=testhost;mc_tool=Elasticsearch;mc_object=test object;mc_object_class=test object class;mc_parameter=test parameter;mc_parameter_value=test parameter value',
+    }
+    match = {'@timestamp': '2014-01-01T00:00:00',
+         'somefield': 'foobarbaz',
+         'nested': {'field': 1}}
+    with pytest.raises(EAException):
+        alert = MSendServiceAlerter(rule)
+
+
+# Test for slotsetvalues - plain text values
+def test_msend_service_slotsetvalues_dict_plaintext():
+    rule = {
+        'type': mock_rule(),
+        'alert_subject': 'Alert Subject',
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+        'msend_slotsetvalues' : {
+            'mc_host': 'testhost',
+            'mc_tool': 'Elasticsearch'
+        }
+    }
+    match = {'@timestamp': '2014-01-01T00:00:00',
+         'somefield': 'foobarbaz',
+         'nested': {'field': 1}}
+    alert = MSendServiceAlerter(rule)
+    expected_headers = {'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'}
+    expected_data = '{"msend_event_severity": "WARNING", "msend_event_slotvalues": {"mc_host": "testhost", "mc_tool": "Elasticsearch"}, "msend_cell_name": "somecellname", "msend_event_message": "Alert Subject", "msend_event_class": "EVENT"}'
+ 
+    with mock.patch("elastalert_modules.cx_alerters.requests.post") as mock_post:
+        alert.alert([match])
+    mock_post.assert_called_with('http://www.example.com/', headers = expected_headers, data = expected_data)
+
+# Test for slotsetvalues - variable substitution with old string format
+def test_msend_service_slotsetvalues_dict_variable_subst_oldstrformat():
+    rule = {
+        'type': mock_rule(),
+        'alert_subject': 'Alert Subject',
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+        'msend_slotsetvalues' : {
+            'mc_host': 'testhost',
+            'mc_tool': 'Elasticsearch',
+            'mc_long_msg': '%(somefield)s',
+        }
+    }
+    match = {'@timestamp': '2014-01-01T00:00:00',
+         'somefield': 'foobarbaz',
+         'nested': {'field': 1}}
+    alert = MSendServiceAlerter(rule)
+    expected_headers = {'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'}
+    expected_data = '{"msend_event_severity": "WARNING", "msend_event_slotvalues": {"mc_long_msg": "foobarbaz", "mc_host": "testhost", "mc_tool": "Elasticsearch"}, "msend_cell_name": "somecellname", "msend_event_message": "Alert Subject", "msend_event_class": "EVENT"}'
+    with mock.patch("elastalert_modules.cx_alerters.requests.post") as mock_post:
+        alert.alert([match])
+    mock_post.assert_called_with('http://www.example.com/', headers = expected_headers, data = expected_data)
+
+# Test for slotsetvalues - variable substitution with new string format
+def test_msend_service_slotsetvalues_dict_variable_subst_newstrformat():
+    rule = {
+        'type': mock_rule(),
+        'new_style_string_format': True,
+        'alert_subject': 'Alert Subject',
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+        'msend_slotsetvalues' : {
+            'mc_host': 'testhost',
+            'mc_tool': 'Elasticsearch',
+            'mc_long_msg': '{match[somefield]}',
+            'mc_more_msg': '{match[nested][field]}'
+        }
+    }
+    match = {'@timestamp': '2014-01-01T00:00:00',
+         'somefield': 'foobarbaz',
+         'nested': {'field': 1}}
+    alert = MSendServiceAlerter(rule)
+    expected_headers = {'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'}
+    expected_data = '{"msend_event_severity": "WARNING", "msend_event_slotvalues": {"mc_long_msg": "foobarbaz", "mc_more_msg": "1", "mc_host": "testhost", "mc_tool": "Elasticsearch"}, "msend_cell_name": "somecellname", "msend_event_message": "Alert Subject", "msend_event_class": "EVENT"}'
+    with mock.patch("elastalert_modules.cx_alerters.requests.post") as mock_post:
+        alert.alert([match])
+    mock_post.assert_called_with('http://www.example.com/', headers = expected_headers, data = expected_data)
+
+# Test for slotsetvalues - mc_notes handling
+def test_msend_service_slotsetvalues_mc_notes():
+    rule = {
+        'type': mock_rule(),
+        'new_style_string_format': True,
+        'alert_subject': 'Alert Subject',
+        'alert_text': 'Alert Text',
+        'msend_service_url' : 'http://www.example.com/',
+        'msend_cell_name': 'somecellname',
+        'msend_event_class': 'EVENT',
+        'msend_event_severity': 'WARNING',
+        'msend_slotsetvalues' : {
+            'mc_host': 'testhost',
+            'mc_tool': 'Elasticsearch',
+            'mc_long_msg': '{match[somefield]}',
+            'mc_more_msg': '{match[nested][field]}',
+            'mc_notes': ['{match[@timestamp]}', 'ElasticSearch', 'notes #1', '{match[@timestamp]}', 'ElasticSearch','notes #2', '{match[@timestamp]}', 'ElasticSearch','more notes']
+        }
+    }
+    match = {'@timestamp': '2014-01-01T00:00:00',
+         'somefield': 'foobarbaz',
+         'nested': {'field': 1}}
+    alert = MSendServiceAlerter(rule)
+    expected_headers = {'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'}
+    expected_data = '{"msend_event_severity": "WARNING", "msend_event_slotvalues": {"mc_long_msg": "foobarbaz", "mc_more_msg": "1", "mc_notes": "[\'0x52c35a80\',\'ElasticSearch\',\'notes #1\',\'0x52c35a80\',\'ElasticSearch\',\'notes #2\',\'0x52c35a80\',\'ElasticSearch\',\'more notes\']", "mc_host": "testhost", "mc_tool": "Elasticsearch"}, "msend_cell_name": "somecellname", "msend_event_message": "Alert Subject", "msend_event_class": "EVENT"}'
+    with mock.patch("elastalert_modules.cx_alerters.requests.post") as mock_post:
+        alert.alert([match])
+    mock_post.assert_called_with('http://www.example.com/', headers = expected_headers, data = expected_data)
 
 
 def test_http_post_init_validation():
